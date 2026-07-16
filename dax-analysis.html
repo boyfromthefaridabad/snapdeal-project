@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>DAX Measures and Analysis</title>
+  <style>
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.5.0/github-markdown-light.min.css" />
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">DAX Measures and Analysis</h1>
+</header>
+<h1
+id="e-commerce-pricing-risk-trust-analytics-power-bi-project">E-Commerce
+Pricing, Risk &amp; Trust Analytics — Power BI Project</h1>
+<p><strong>Dataset:</strong> <code>Ecommerce_Dataset.xlsx</code>
+(sheets: <code>Products</code>, <code>DailyScrapeLog</code>)
+<strong>Model:</strong> Star schema — <code>Products</code> (dimension +
+attributes) ↔︎ <code>DailyScrapeLog</code> (fact, one row per Product per
+ScrapingDate) joined on <code>ProductID</code>.</p>
+<p>Create these two base relationships in Power BI: -
+<code>Products[ProductID]</code> (1) →
+<code>DailyScrapeLog[ProductID]</code> (*) - Mark
+<code>DailyScrapeLog[ScrapingDate]</code> as a Date table, or build a
+separate <code>Calendar</code> table and relate it to
+<code>DailyScrapeLog[ScrapingDate]</code>.</p>
+<hr />
+<h2 id="task-1-pricing-vs-satisfaction-exception-detection">Task 1 —
+Pricing vs Satisfaction Exception Detection</h2>
+<p><strong>Goal:</strong> Flag products that are simultaneously
+overpriced, under-rated, high-risk, and under-selling relative to their
+category.</p>
+<h3 id="measures">Measures</h3>
+<pre class="dax"><code>Avg Price in Category =
+CALCULATE (
+    AVERAGE ( Products[MRP] ),
+    ALLEXCEPT ( Products, Products[Category] )
+)
+
+Avg Rating in Category =
+CALCULATE (
+    AVERAGE ( Products[Rating] ),
+    ALLEXCEPT ( Products, Products[Category] )
+)
+
+Median Sales in Category =
+CALCULATE (
+    MEDIANX ( ALLEXCEPT ( Products, Products[Category] ), Products[Sales_Last30Days] )
+)
+
+Risk Score =
+Products[AvgDiscount_Last30Days]
+    * ( 1 - ( Products[Rating] / 5 ) )
+    * Products[StockValue]
+
+Risk Score Percentile Rank =
+RANKX (
+    ALL ( Products ),
+    [Risk Score],
+    ,
+    DESC
+) / COUNTROWS ( ALL ( Products ) )
+
+Is Exception Product =
+VAR PriceHigh   = Products[MRP] &gt; [Avg Price in Category]
+VAR RatingLow   = Products[Rating] &lt; [Avg Rating in Category]
+VAR RiskTop20   = [Risk Score Percentile Rank] &lt;= 0.20
+VAR SalesBelowMedian = Products[Sales_Last30Days] &lt; [Median Sales in Category]
+RETURN
+IF ( PriceHigh &amp;&amp; RatingLow &amp;&amp; RiskTop20 &amp;&amp; SalesBelowMedian, 1, 0 )</code></pre>
+<p>Build the table visual using: <code>ProductName</code>,
+<code>Category</code>, <code>MRP</code>,
+<code>[Avg Price in Category]</code>, <code>Rating</code>,
+<code>[Avg Rating in Category]</code>, <code>Risk Score</code>,
+<code>Sales_Last30Days</code>, <code>[Median Sales in Category]</code>,
+filtered where <code>[Is Exception Product] = 1</code>. <em>(All logic
+lives in measures — no calculated columns needed, satisfying the
+“measures only” constraint.)</em></p>
+<h3 id="business-interpretation">Business interpretation</h3>
+<p>These products fail on <strong>every dimension
+simultaneously</strong>: customers are paying a premium for something
+rated worse than category peers, the capital tied up in that inventory
+is disproportionately risky, and sales aren’t compensating for any of
+it. This is not one bad metric — it is a <em>compounding</em> failure
+pattern, which is why it needs a table, not a single KPI.</p>
+<p><strong>Recommended manager actions, by root cause:</strong> -
+<strong>Re-price</strong> — if the rating is only slightly below average
+and reviews mention “value for money,” the price is the real problem; a
+targeted markdown, not a blanket discount, restores competitiveness
+without triggering another quality-perception hit. - <strong>Quality
+improvement</strong> — if the rating gap is large and return-rate is
+elevated, the product itself is broken; further discounting will only
+accelerate loss-making, low-satisfaction sales. - <strong>Removal /
+delisting</strong> — if both price and rating gaps are severe
+<em>and</em> stock value is high, the product is actively destroying
+margin and brand trust at scale — delist and liquidate remaining stock
+rather than continue merchandising it.</p>
+<hr />
+<h2 id="task-2-promotion-effectiveness-trend-analysis">Task 2 —
+Promotion Effectiveness Trend Analysis</h2>
+<p><strong>Goal:</strong> Separate “real” discounting during promotions
+from a product’s normal, everyday discount level, using the daily scrape
+history.</p>
+<h3 id="measures-1">Measures</h3>
+<pre class="dax"><code>Baseline Discount (30d non-promo) =
+VAR NonPromoDates =
+    CALCULATETABLE (
+        VALUES ( DailyScrapeLog[ScrapingDate] ),
+        DailyScrapeLog[IsPromotional] = 0
+    )
+VAR Last30NonPromo =
+    TOPN ( 30, NonPromoDates, DailyScrapeLog[ScrapingDate], DESC )
+RETURN
+CALCULATE (
+    AVERAGE ( DailyScrapeLog[DiscountPercentage] ),
+    KEEPFILTERS ( Last30NonPromo ),
+    DailyScrapeLog[IsPromotional] = 0
+)
+
+Daily Discount =
+AVERAGE ( DailyScrapeLog[DiscountPercentage] )
+
+Promotional Lift =
+VAR CurrentDiscount = [Daily Discount]
+VAR Baseline        = [Baseline Discount (30d non-promo)]
+RETURN
+IF ( ISBLANK ( CurrentDiscount ) || ISBLANK ( Baseline ), BLANK(), CurrentDiscount - Baseline )
+
+Is Promo Day (Any) =
+IF ( CALCULATE ( MAX ( DailyScrapeLog[IsPromotional] ) ) = 1, 1, 0 )</code></pre>
+<h3 id="visual">Visual</h3>
+<p>Line chart, X-axis = <code>ScrapingDate</code>, lines =
+<code>[Daily Discount]</code>,
+<code>[Baseline Discount (30d non-promo)]</code>, and
+<code>[Promotional Lift]</code> (or plot <code>Promotional Lift</code>
+as a column overlay to show spikes clearly). Add a category/product
+slicer since baseline discount is product-specific.</p>
+<h3 id="business-interpretation-1">Business interpretation</h3>
+<p>The <strong>baseline</strong> answers “what does this product
+normally cost after typical discounting?” The <strong>lift</strong>
+isolates the <em>incremental</em> discount attributable to the promotion
+itself.</p>
+<ul>
+<li>If promotional lift is consistently large and coincides with a
+genuine sales-volume spike (cross-check against <code>UnitsSold</code>)
+→ the promotion is generating <strong>real incremental
+demand</strong>.</li>
+<li>If the “baseline” price was already quietly creeping up in the days
+just before a promotion (a classic
+<strong>anchoring/inflate-then-discount pattern</strong>), the “big
+discount” is partly an illusion — the customer isn’t actually paying
+less than they would have a few weeks earlier.</li>
+<li>This distinction matters because promotions that only
+<em>simulate</em> savings erode customer trust once discovered, and
+inflate reported promotional ROI without real margin or demand
+benefit.</li>
+</ul>
+<hr />
+<h2 id="task-3-discount-vs-rating-causation-analysis">Task 3 — Discount
+vs Rating Causation Analysis</h2>
+<p><strong>Goal:</strong> Test whether discounting <em>causes</em>
+better ratings, or whether the apparent relationship is confounded by
+sales/review volume.</p>
+<h3 id="measures-2">Measures</h3>
+<pre class="dax"><code>Avg Discount =
+AVERAGE ( DailyScrapeLog[DiscountPercentage] )
+
+Avg Rating =
+AVERAGE ( Products[Rating] )
+
+Review Count =
+SUM ( Products[ReviewCount] )
+
+Rating Controlled for Review Volume =
+VAR ReviewBucket =
+    SWITCH (
+        TRUE(),
+        Products[ReviewCount] &lt; 50, &quot;Low (&lt;50)&quot;,
+        Products[ReviewCount] &lt; 500, &quot;Medium (50-500)&quot;,
+        &quot;High (500+)&quot;
+    )
+RETURN
+CALCULATE (
+    AVERAGE ( Products[Rating] ),
+    ALLEXCEPT ( Products, Products[ReviewCount] ),   -- placeholder; bucket via calc column or grouping table recommended
+    FILTER ( ALL ( Products ), TRUE() )
+)
+
+-- Cleaner approach: create a &quot;Review Volume Band&quot; grouping (Modeling &gt; New Group, or a
+-- small DAX table) with bands Low / Medium / High, then:
+
+Avg Rating by Review Band =
+CALCULATE ( AVERAGE ( Products[Rating] ) )   -- sliced by the Review Volume Band on the axis
+
+Correlation Discount-Rating (approx) =
+VAR N = COUNTROWS ( Products )
+VAR SumX = SUMX ( Products, Products[AvgDiscount_Last30Days] )
+VAR SumY = SUMX ( Products, Products[Rating] )
+VAR SumXY = SUMX ( Products, Products[AvgDiscount_Last30Days] * Products[Rating] )
+VAR SumX2 = SUMX ( Products, Products[AvgDiscount_Last30Days] ^ 2 )
+VAR SumY2 = SUMX ( Products, Products[Rating] ^ 2 )
+VAR Numerator = N * SumXY - SumX * SumY
+VAR Denominator = SQRT ( ( N * SumX2 - SumX ^ 2 ) * ( N * SumY2 - SumY ^ 2 ) )
+RETURN DIVIDE ( Numerator, Denominator )</code></pre>
+<h3 id="visuals">Visuals</h3>
+<ol type="1">
+<li><strong>Scatter plot</strong>: X = <code>[Avg Discount]</code>, Y =
+<code>Products[Rating]</code>, one dot per product, with Power BI’s
+built-in trend line turned on (Format pane → Analytics → Trend line) for
+the regression line.</li>
+<li><strong>Supporting scatter</strong>: X =
+<code>[Avg Discount]</code>, Y = <code>[Review Count]</code> — shows
+whether discounting drives review <em>volume</em> rather than review
+<em>quality</em>.</li>
+<li><strong>Bar/line chart</strong>: Rating by <strong>Review Volume
+Band</strong> (Low/Medium/High) — shows whether rating differences
+persist once review count is controlled for.</li>
+</ol>
+<h3 id="business-interpretation-2">Business interpretation</h3>
+<ul>
+<li>If discount and rating show a mild positive slope
+<strong>only</strong> in the raw scatter, but that slope
+<strong>flattens or disappears</strong> once you compare within the same
+review-volume band, the apparent “discounts improve satisfaction”
+relationship is a <strong>confound</strong>: heavier discounting drives
+more purchases → more reviews → and high-volume products regress toward
+an average (often higher-looking) rating simply through statistical
+averaging, not genuinely better products.</li>
+<li>If discount correlates strongly with <strong>review count</strong>
+but only weakly with <strong>rating itself</strong>, that’s direct
+evidence ratings are improving mainly through volume dynamics (more
+buyers, more “average” reviews diluting outliers) rather than the
+product actually satisfying customers more.</li>
+<li>Conclusion for the manager: don’t treat “discounted products have
+higher ratings” as proof that discounting improves quality perception —
+it’s more likely a sampling effect.</li>
+</ul>
+<hr />
+<h2 id="task-4-financially-risky-inventory-kpi">Task 4 — Financially
+Risky Inventory KPI</h2>
+<h3 id="measures-3">Measures</h3>
+<pre class="dax"><code>Risk Score =
+Products[AvgDiscount_Last30Days]
+    * ( 1 - ( Products[Rating] / 5 ) )
+    * Products[StockValue]
+
+Total Stock Value =
+SUM ( Products[StockValue] )
+
+At-Risk Stock Value =
+CALCULATE (
+    SUM ( Products[StockValue] ),
+    FILTER ( Products, [Risk Score] &gt; 0 )   -- or use a materiality threshold, see note
+)
+
+-- Recommended: define &quot;at risk&quot; as Risk Score above a materiality threshold
+-- (e.g., top quartile of Risk Score) rather than simply &gt;0, since &gt;0 is almost every row.
+
+Risk Threshold (P75) =
+PERCENTILEX.INC ( ALL ( Products ), [Risk Score], 0.75 )
+
+At-Risk Stock Value (P75+) =
+SUMX (
+    FILTER ( Products, [Risk Score] &gt;= [Risk Threshold (P75)] ),
+    Products[StockValue]
+)
+
+% Inventory Value At Risk =
+DIVIDE ( [At-Risk Stock Value (P75+)], [Total Stock Value] )</code></pre>
+<h3 id="kpi-card-with-conditional-formatting">KPI Card with conditional
+formatting</h3>
+<p>Use the <code>% Inventory Value At Risk</code> measure on a
+<strong>Card</strong> visual, then add conditional formatting via a
+background-color rule (or use the “KPI” visual / a gauge): -
+<strong>Green</strong>: <code>&lt; 10%</code> - <strong>Yellow</strong>:
+<code>10% – 25%</code> - <strong>Red</strong>: <code>&gt; 25%</code></p>
+<p>(Implement with a measure returning a color hex/state, bound to the
+card’s conditional formatting, e.g. a <code>Risk KPI Color</code>
+measure using
+<code>SWITCH(TRUE(), [%...] &lt; 0.10, "#2ECC71", [%...] &lt;= 0.25, "#F1C40F", "#E74C3C")</code>.)</p>
+<h3 id="business-interpretation-3">Business interpretation</h3>
+<p>The Risk Score deliberately multiplies three failure modes together:
+<strong>how heavily a product is being discounted</strong>, <strong>how
+poorly it’s rated</strong>, and <strong>how much capital is tied up in
+it as inventory</strong>. A product can be heavily discounted
+<em>and</em> fine if it’s well rated and low-stock; the KPI only flags
+capital that is both being given away in discounts <em>and</em> attached
+to a badly-reviewed item. A rising red KPI signals the company is
+simultaneously (a) mispricing — because heavy discounting was needed to
+move stock — and (b) carrying quality problems at scale, both of which
+directly erode gross margin and long-run brand equity if
+unaddressed.</p>
+<hr />
+<h2 id="task-5-trust-weighted-rating-index">Task 5 — Trust-Weighted
+Rating Index</h2>
+<h3 id="measures-4">Measures</h3>
+<pre class="dax"><code>Trust Score =
+Products[Rating]
+    * LOG ( 1 + Products[ReviewCount] )
+    * ( 1 - Products[ReturnRate] )
+
+Trust-Weighted Avg Rating =
+DIVIDE (
+    SUMX ( Products, Products[Rating] * [Trust Score] ),
+    SUMX ( Products, [Trust Score] )
+)
+
+Simple Avg Rating =
+AVERAGE ( Products[Rating] )
+
+Review-Weighted Avg Rating =
+DIVIDE (
+    SUMX ( Products, Products[Rating] * Products[ReviewCount] ),
+    SUM ( Products[ReviewCount] )
+)</code></pre>
+<h3 id="visual-1">Visual</h3>
+<p>A clustered bar/column chart with three columns —
+<code>Simple Avg Rating</code>, <code>Review-Weighted Avg Rating</code>,
+<code>Trust-Weighted Avg Rating</code> — as a small comparison panel (or
+three KPI cards side by side), optionally sliced by Category.</p>
+<h3 id="business-interpretation-4">Business interpretation</h3>
+<p>A product can rack up a high <strong>simple average rating</strong>
+from a handful of reviews with no returns data behind it — that number
+is fragile and easy to game. <code>LOG(1 + ReviewCount)</code> rewards
+ratings that are backed by real sample size but with <strong>diminishing
+returns</strong> (so a product with 10,000 reviews doesn’t dominate the
+index purely on volume the way a plain review-weighted average would).
+Multiplying by <code>(1 − ReturnRate)</code> penalizes products
+customers rated well <em>before</em> they actually used them, then sent
+back — a common pattern for items that look good on the page but
+disappoint in person. The result: a product with a perfect 5.0 star
+rating but only 4 reviews and a 30% return rate is <em>less
+trustworthy</em> than a 4.3-star product with 3,000 reviews and a 4%
+return rate — and the Trust-Weighted Index surfaces that, while a naive
+star-rating leaderboard would not.</p>
+<hr />
+<h2 id="task-6-context-aware-price-banding">Task 6 — Context-Aware Price
+Banding</h2>
+<h3
+id="dax-calculated-column-is-required-here-since-the-task-explicitly-asks-for-one-percentiles-still-recompute-dynamically-at-the-visualfilter-level-via-the-paired-measures-below">DAX
+(Calculated Column <em>is required here</em> since the task explicitly
+asks for one; percentiles still recompute dynamically at the
+visual/filter level via the paired measures below)</h3>
+<pre class="dax"><code>-- Calculated column (static classification for reference / conditional formatting):
+Price Band =
+VAR P30 =
+    PERCENTILEX.INC ( ALLSELECTED ( Products ), Products[MRP], 0.30 )
+VAR P70 =
+    PERCENTILEX.INC ( ALLSELECTED ( Products ), Products[MRP], 0.70 )
+RETURN
+SWITCH (
+    TRUE(),
+    Products[MRP] &lt;= P30, &quot;Low&quot;,
+    Products[MRP] &lt;= P70, &quot;Medium&quot;,
+    &quot;High&quot;
+)</code></pre>
+<blockquote>
+<p>Note: a true calculated <strong>column</strong> cannot react to
+slicers at query time (columns are computed once, at refresh). To make
+the band genuinely filter-context-aware as the task requires, pair it
+with measures that recompute the thresholds live and re-bucket via
+measure logic in the visual:</p>
+</blockquote>
+<pre class="dax"><code>Dynamic P30 Threshold =
+PERCENTILEX.INC ( ALLSELECTED ( Products ), Products[MRP], 0.30 )
+
+Dynamic P70 Threshold =
+PERCENTILEX.INC ( ALLSELECTED ( Products ), Products[MRP], 0.70 )
+
+Dynamic Price Band (Measure) =
+VAR AvgPriceSelected = AVERAGE ( Products[MRP] )
+RETURN
+SWITCH (
+    TRUE(),
+    AvgPriceSelected &lt;= [Dynamic P30 Threshold], &quot;Low&quot;,
+    AvgPriceSelected &lt;= [Dynamic P70 Threshold], &quot;Medium&quot;,
+    &quot;High&quot;
+)
+
+Product Count by Dynamic Band =
+VAR P30 = [Dynamic P30 Threshold]
+VAR P70 = [Dynamic P70 Threshold]
+RETURN
+SWITCH (
+    TRUE(),
+    SELECTEDVALUE ( &#39;Price Band Table&#39;[Band] ) = &quot;Low&quot;,
+    COUNTROWS ( FILTER ( ALLSELECTED ( Products ), Products[MRP] &lt;= P30 ) ),
+    SELECTEDVALUE ( &#39;Price Band Table&#39;[Band] ) = &quot;Medium&quot;,
+    COUNTROWS ( FILTER ( ALLSELECTED ( Products ), Products[MRP] &gt; P30 &amp;&amp; Products[MRP] &lt;= P70 ) ),
+    COUNTROWS ( FILTER ( ALLSELECTED ( Products ), Products[MRP] &gt; P70 ) )
+)</code></pre>
+<p>Create a small disconnected <code>'Price Band Table'</code> with one
+column <code>Band</code> = {“Low”,“Medium”,“High”} to drive the axis,
+and use <code>Product Count by Dynamic Band</code> as the value — this
+is what makes the bucket counts recalculate live from whatever
+category/brand/time slicer is applied.</p>
+<h3 id="visual-2">Visual</h3>
+<p>Stacked column or donut chart of product count (or stock value) by
+<code>Dynamic Price Band</code>, with Category and Brand slicers on the
+page so the recalculation is visibly demonstrated.</p>
+<h3 id="business-interpretation-5">Business interpretation</h3>
+<p>A <strong>fixed</strong> price band (e.g., “Low = under ₹500”) makes
+no sense across categories that span wildly different price scales —
+₹500 is expensive for Grocery but trivially cheap for Electronics, so a
+static band mislabels almost everything outside the category it was
+tuned for. Percentile-based bands solve this by asking “cheap/expensive
+<strong>relative to what’s currently in view</strong>” — so filtering to
+“Electronics only” recomputes the 30th/70th percentile <em>within</em>
+Electronics prices, correctly reclassifying products that looked “High”
+against the whole catalog but are actually mid-range within their own
+category. This filter-context sensitivity is exactly what makes DAX
+percentile measures more honest than hardcoded thresholds for real
+merchandising decisions — a manager filtering into a single category
+needs bands calibrated to that category, not to the whole catalog.</p>
+<hr />
+<h2 id="suggested-report-pages">Suggested Report Pages</h2>
+<ol type="1">
+<li><strong>Overview</strong> — KPI cards (Total Products, Total Stock
+Value, % Inventory At Risk)</li>
+<li><strong>Exception Products</strong> (Task 1) — table + slicers</li>
+<li><strong>Promotion Trends</strong> (Task 2) — line chart with
+product/category slicer</li>
+<li><strong>Discount vs Rating</strong> (Task 3) — scatter + supporting
+scatter + banded bar chart</li>
+<li><strong>Risk KPI</strong> (Task 4) — KPI card, conditional
+formatting</li>
+<li><strong>Trust Index</strong> (Task 5) — comparison bar chart</li>
+<li><strong>Price Banding</strong> (Task 6) — dynamic band chart with
+slicers</li>
+</ol>
+</body>
+</html>
